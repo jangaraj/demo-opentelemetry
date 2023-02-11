@@ -1,0 +1,24 @@
+ports:
+  - port: 80    # keycloak
+    onOpen: open-browser
+    visibility: public
+  - port: 16686 # jaeger
+    onOpen: open-browser
+    visibility: public
+  - port: 3000  # grafana
+    onOpen: open-browser
+    visibility: public
+  - port: 5601  # kibana
+    onOpen: open-browser
+    visibility: public
+  - port: 9000  # cribl
+    onOpen: open-browser
+    visibility: public
+  - port: 9090  # prometheuss
+    onOpen: open-browser
+    visibility: public
+
+tasks:
+  - name: docker-compose
+    init:
+      docker-compose up -d --build && docker logs -f keycloak

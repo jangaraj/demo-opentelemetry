@@ -1,0 +1,173 @@
+version: '3.8'
+
+services:
+
+  nginx:
+    container_name: nginx
+    image: nginx:latest
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - 80:8080
+    depends_on:
+      - keycloak
+  
+  keycloak:
+    container_name: keycloak
+    build:
+      context: .
+      dockerfile: keycloak/Dockerfile-keycloak-with-opentelemetry
+    ports:
+      - 9464:9464
+    environment:
+      JAVA_OPTS_APPEND: "-javaagent:/tmp/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: keycloak
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4317
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_METRICS_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: edge
+    depends_on:
+      - otel
+    command:
+      - start-dev
+      - '--log-console-output=json'
+      - '--log=console'
+      - '--log-level=DEBUG'
+
+  jaeger:
+    container_name: jaeger
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - 16686:16686 # Jaeger UI
+      - 4317:55680  # GRPC OTLP
+      - 13133:13133 # Healthcheck
+    environment:
+      LOGSPOUT: ignore
+
+  tempo:
+    container_name: tempo
+    image: grafana/tempo:latest
+    command: 
+      - "-config.file=/etc/tempo.yaml"
+    volumes:
+      - ./tempo/tempo.yml:/etc/tempo.yaml:ro
+    ports:
+      - "14268:14268" # jaeger
+      - "3200:3200"   # tempo
+      - "44317:4317"  # otlp grpc
+      - "44318:4318"  # otlp http
+      - "9411:9411"   # zipkin
+      - "2345:2345"   # delve debug server
+    environment:
+      LOGSPOUT: ignore
+
+  synthetic-load-generator:
+    container_name: synthetic-load-generator
+    image: omnition/synthetic-load-generator:1.0.29
+    volumes:
+      - ./synthetic-load-generator/load-generator.json:/etc/load-generator.json
+    environment:
+      LOGSPOUT: ignore
+      TOPOLOGY_FILE: /etc/load-generator.json
+      JAEGER_COLLECTOR_URL: "http://otel:14268"
+    depends_on:
+      - otel
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/dashboards:/provisioning/dashboards
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - 3000:3000
+    environment:
+      LOGSPOUT: ignore
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_HOME_PAGE: /d/Xbo7ftQnz/keycloak?orgId=1
+    depends_on:
+      - jaeger
+      - prometheus
+      - tempo
+
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:latest
+    ports:
+      - 9090:9090
+    environment:
+      LOGSPOUT: ignore
+    command: 
+      - "--web.enable-remote-write-receiver"
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+
+  otel:
+    container_name: otel
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./otel/otel-config.yaml:/etc/otel-config.yaml
+    command:
+      '--config=/etc/otel-config.yaml'
+    environment:
+      LOGSPOUT: ignore
+    depends_on:
+      - jaeger
+      - prometheus
+      - elasticsearch
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.6.1
+    container_name: elasticsearch
+    environment:
+      - LOGSPOUT=ignore
+      - xpack.security.enabled=false
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    cap_add:
+      - IPC_LOCK
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.6.1
+    container_name: kibana
+    ports:
+      - 5601:5601
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      LOGSPOUT: ignore      
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: 181a0b1964f9968093bd05e26c7a9b1c
+      XPACK_REPORTING_ENCRYPTIONKEY: 618ad181c0786f4f3be6299fbf661de3
+      XPACK_SECURITY_ENCRYPTIONKEY: a017e442013e766c008879dfcf48a78f
+    depends_on:
+      - elasticsearch
+      
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.6.1
+    container_name: logstash
+    volumes:
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    environment:
+      LS_JAVA_OPTS: "-Xmx256m -Xms256m"
+      LOGSPOUT: ignore
+    depends_on:
+      - elasticsearch
+      
+  logspout:
+    image: gliderlabs/logspout:v3
+    container_name: logspout
+    command: 'udp://logstash:5044'
+    environment:
+      LOGSPOUT: ignore
+    volumes:
+      - '/var/run/docker.sock:/tmp/docker.sock'
+    depends_on:
+      - logstash
